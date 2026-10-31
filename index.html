@@ -1054,15 +1054,67 @@
       }
     };
 
-    window.previewImage = function(input) {
-      if (input.files && input.files[0]) {
+    // Resize & compress an image file down to fit Firestore's 1MB field limit.
+    // Progressively lowers JPEG quality / dimensions until the base64 string is small enough.
+    function compressImageToDataUrl(file, maxDim, quality) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
         const reader = new FileReader();
-        reader.onload = function(e) {
-          window.rescueState.photoBase64 = e.target.result;
-          document.getElementById('photoPreviewImg').src = e.target.result;
-          document.getElementById('photoPreviewBox').classList.remove('hidden');
+        reader.onload = (e) => { img.src = e.target.result; };
+        reader.onerror = reject;
+        img.onload = () => {
+          let { width, height } = img;
+          if (width > height && width > maxDim) {
+            height = Math.round(height * (maxDim / width));
+            width = maxDim;
+          } else if (height > maxDim) {
+            width = Math.round(width * (maxDim / height));
+            height = maxDim;
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', quality));
         };
-        reader.readAsDataURL(input.files[0]);
+        img.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    window.previewImage = async function(input) {
+      if (input.files && input.files[0]) {
+        const file = input.files[0];
+        const uploadPrompt = document.getElementById('uploadPrompt');
+        const originalPromptHtml = uploadPrompt.innerHTML;
+        uploadPrompt.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-2xl text-brand-600 mb-2"></i><p class="text-xs text-slate-600 font-bold">Đang xử lý ảnh...</p>';
+
+        // Max size Firestore allows per field is ~1,048,487 bytes; stay safely under that.
+        const MAX_BYTES = 700000;
+        let maxDim = 1280;
+        let quality = 0.8;
+        let dataUrl = await compressImageToDataUrl(file, maxDim, quality);
+
+        // Progressively shrink further if still too large
+        let attempts = 0;
+        while (dataUrl.length > MAX_BYTES && attempts < 6) {
+          quality = Math.max(0.4, quality - 0.15);
+          maxDim = Math.max(480, Math.round(maxDim * 0.8));
+          dataUrl = await compressImageToDataUrl(file, maxDim, quality);
+          attempts++;
+        }
+
+        uploadPrompt.innerHTML = originalPromptHtml;
+
+        if (dataUrl.length > MAX_BYTES) {
+          alert('Ảnh vẫn còn quá nặng sau khi nén, vui lòng chọn ảnh khác hoặc chụp lại với độ phân giải thấp hơn.');
+          return;
+        }
+
+        window.rescueState.photoBase64 = dataUrl;
+        document.getElementById('photoPreviewImg').src = dataUrl;
+        document.getElementById('photoPreviewBox').classList.remove('hidden');
       }
     };
 
@@ -1109,17 +1161,23 @@
       btn.disabled = true;
       btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xl"></i><span>ĐANG TẢI LÊN HỆ THỐNG...</span>';
 
-      await window.saveRequestToDb(newReq);
+      try {
+        await window.saveRequestToDb(newReq);
 
-      btn.disabled = false;
-      btn.innerHTML = '<i class="fa-solid fa-circle-radiation text-2xl animate-spin"></i><span>GỬI YÊU CẦU CỨU HỘ NGAY</span>';
+        // Show tracking UI
+        window.rescueState.currentTrackingId = reqId;
+        document.getElementById('trackingCard').classList.remove('hidden');
+        document.getElementById('trackingCard').scrollIntoView({ behavior: 'smooth' });
 
-      // Show tracking UI
-      window.rescueState.currentTrackingId = reqId;
-      document.getElementById('trackingCard').classList.remove('hidden');
-      document.getElementById('trackingCard').scrollIntoView({ behavior: 'smooth' });
-
-      updateTrackingCardUI(newReq);
+        updateTrackingCardUI(newReq);
+      } catch (err) {
+        console.error('Gửi yêu cầu thất bại:', err);
+        alert('Có lỗi khi gửi yêu cầu, vui lòng thử lại. Chi tiết: ' + (err && err.message ? err.message : err));
+      } finally {
+        // Always re-enable the button, even if something above failed unexpectedly
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-circle-radiation text-2xl animate-spin"></i><span>GỬI YÊU CẦU CỨU HỘ NGAY</span>';
+      }
     };
 
     window.assignTechToJob = async function(reqId, techName) {
