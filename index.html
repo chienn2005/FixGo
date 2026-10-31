@@ -543,7 +543,7 @@
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
     import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getFirestore, collection, doc, setDoc, updateDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { initializeFirestore, collection, doc, setDoc, updateDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
     // Global App Configuration
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'fixgo-rescue-app';
@@ -578,7 +578,13 @@
       try {
         const app = initializeApp(firebaseConfig);
         auth = getAuth(app);
-        db = getFirestore(app);
+        // Force long-polling instead of WebChannel streaming — many school/office networks
+        // and some browser privacy extensions block or break the streaming transport,
+        // which otherwise causes writes to hang indefinitely.
+        db = initializeFirestore(app, {
+          experimentalAutoDetectLongPolling: true,
+          useFetchStreams: false
+        });
 
         // Rule 3: Auth Before Queries
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
@@ -647,7 +653,12 @@
       if (db && currentUser) {
         try {
           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'rescue_requests', reqData.id);
-          await setDoc(docRef, reqData);
+          // Race the Firestore write against a timeout: on a flaky/blocked network the
+          // write can hang indefinitely instead of rejecting, which would freeze the UI.
+          await Promise.race([
+            setDoc(docRef, reqData),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore write timed out')), 8000))
+          ]);
           return;
         } catch (err) {
           console.warn("Firestore save failed, fallback to local:", err);
